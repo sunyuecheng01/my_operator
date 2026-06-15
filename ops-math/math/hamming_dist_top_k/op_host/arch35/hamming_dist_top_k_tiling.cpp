@@ -74,16 +74,16 @@ int64_t CalcOutputChunkLen(int64_t maxSeqLen, int64_t topk)
     return std::max({formulaLen, MIN_OUTPUT_CHUNK_LEN, topk});
 }
 
-bool CheckInt32VectorInput(gert::TilingContext* context, size_t index, const char* name, int64_t batch)
+bool CheckInt32VectorInput(gert::TilingContext* context, size_t index, const char* inputName, int64_t batch)
 {
     auto desc = context->GetInputDesc(index);
     auto shape = context->GetInputShape(index);
     OP_CHECK_NULL_WITH_CONTEXT(context, desc);
     OP_CHECK_NULL_WITH_CONTEXT(context, shape);
     OP_CHECK_IF(desc->GetDataType() != ge::DT_INT32,
-        OP_LOGE(context->GetNodeName(), "%s must be DT_INT32.", name), return false);
+        OP_LOGE(context->GetNodeName(), "%s must be DT_INT32.", inputName), return false);
     OP_CHECK_IF(shape->GetStorageShape().GetDimNum() != 1 || shape->GetStorageShape().GetDim(0) != batch,
-        OP_LOGE(context->GetNodeName(), "%s shape must be [batch].", name), return false);
+        OP_LOGE(context->GetNodeName(), "%s shape must be [batch].", inputName), return false);
     return true;
 }
 
