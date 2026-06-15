@@ -38,10 +38,19 @@ constexpr int64_t TILE_N2_BASIC = 3328;
 constexpr int64_t TILE_N1_SPLIT_S = 128;
 constexpr int64_t TILE_N2_SPLIT_S = 4 * 1024;
 constexpr size_t SYS_WORKSPACE_SIZE = 16 * 1024 * 1024;
+constexpr size_t WORKSPACE_ALIGN = 512;
+constexpr int64_t CUBE_BASE_M = 16;
+constexpr int64_t CUBE_BASE_N = 256;
+constexpr int64_t CUBE_BASE_K = 128;
 
 inline int64_t CeilDiv(int64_t x, int64_t y)
 {
     return y == 0 ? x : (x + y - 1) / y;
+}
+
+inline size_t AlignUp(size_t x, size_t align)
+{
+    return align == 0 ? x : (x + align - 1) / align * align;
 }
 
 int64_t GetTopKAttr(gert::TilingContext* context)
@@ -77,6 +86,27 @@ bool CheckInt32VectorInput(gert::TilingContext* context, size_t index, const cha
         OP_LOGE(context->GetNodeName(), "%s shape must be [batch].", name), return false);
     return true;
 }
+
+bool SetCubeMatmulTiling(gert::TilingContext* context, HammingDistTopKTilingData& tiling,
+    int64_t tileN2, int64_t expandedDim)
+{
+    matmul_tiling::MatmulApiTiling mmTiling;
+    mmTiling.SetAType(
+        matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_INT8, false);
+    mmTiling.SetBType(
+        matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_INT8, false);
+    mmTiling.SetCType(
+        matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_INT32);
+    mmTiling.SetBias(false);
+    mmTiling.SetOrgShape(1, tileN2, expandedDim);
+    mmTiling.SetShape(1, tileN2, expandedDim);
+    mmTiling.SetFixSplit(CUBE_BASE_M, std::min<int64_t>(tileN2, CUBE_BASE_N),
+        std::min<int64_t>(expandedDim, CUBE_BASE_K));
+    mmTiling.SetBufferSpace(-1, -1, -1);
+    OP_CHECK_IF(mmTiling.GetTiling(tiling.mmTiling) == -1,
+        OP_LOGE(context->GetNodeName(), "HammingDistTopK cube matmul tiling failed."), return false);
+    return true;
+}
 } // namespace
 
 static ge::graphStatus TilingPrepareForHammingDistTopK(gert::TilingParseContext* context)
@@ -86,7 +116,7 @@ static ge::graphStatus TilingPrepareForHammingDistTopK(gert::TilingParseContext*
     auto platformInfo = context->GetPlatformInfo();
     OP_CHECK_NULL_WITH_CONTEXT(context, platformInfo);
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(platformInfo);
-    compileInfo->coreNum = ascendcPlatform.GetCoreNumAiv();
+    compileInfo->coreNum = ascendcPlatform.GetCoreNumAic();
     ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, compileInfo->ubSize);
     compileInfo->socVersion = ascendcPlatform.GetSocVersion();
     return ge::GRAPH_SUCCESS;
@@ -128,6 +158,10 @@ static ge::graphStatus TilingForHammingDistTopK(gert::TilingContext* context)
         return ge::GRAPH_FAILED);
     OP_CHECK_IF(keyShape->GetStorageShape().GetDim(DIM_BYTES) != dimBytes,
         OP_LOGE(context->GetNodeName(), "query and key_compressed last dim must be the same."),
+        return ge::GRAPH_FAILED);
+    const int64_t expandedDim = dimBytes * 8;
+    OP_CHECK_IF(expandedDim % 32 != 0,
+        OP_LOGE(context->GetNodeName(), "expanded bit dimension must be aligned to 32 for int8 cube matmul."),
         return ge::GRAPH_FAILED);
     OP_CHECK_IF(queryShape->GetStorageShape().GetDim(DIM_SEQ) != 1,
         OP_LOGE(context->GetNodeName(), "query dim2 must be 1."), return ge::GRAPH_FAILED);
@@ -197,25 +231,44 @@ static ge::graphStatus TilingForHammingDistTopK(gert::TilingContext* context)
     tiling.set_hasChunkSize(hasChunkSize);
     tiling.set_hasKeyBlockTable(hasKeyBlockTable);
 
+    int64_t tileN2 = TILE_N2_BASIC;
     if (hasKeyBlockTable != 0) {
         tiling.set_tileN1(blockSize);
-        tiling.set_tileN2(TILE_N2_BASIC);
+        tileN2 = TILE_N2_BASIC;
     } else if (maxSeqLen > 26 * 1024 || (batch < 16 && maxSeqLen > 8 * 1024)) {
         tiling.set_tileN1(TILE_N1_SPLIT_S);
-        tiling.set_tileN2(TILE_N2_SPLIT_S);
+        tileN2 = TILE_N2_SPLIT_S;
     } else {
         tiling.set_tileN1(TILE_N1_BASIC);
-        tiling.set_tileN2(TILE_N2_BASIC);
+        tileN2 = TILE_N2_BASIC;
     }
+    tiling.set_tileN2(tileN2);
+    tiling.set_expandedDim(expandedDim);
 
     const auto compileInfo = reinterpret_cast<const HammingDistTopKCompileInfo*>(context->GetCompileInfo());
     const int64_t coreNum = (compileInfo != nullptr && compileInfo->coreNum > 0) ? compileInfo->coreNum : 1;
-    context->SetBlockDim(std::min<int64_t>(batch * head, coreNum));
+    const int64_t usedCoreNum = std::max<int64_t>(1, std::min<int64_t>(batch * head, coreNum));
+    tiling.set_usedCoreNum(usedCoreNum);
+    context->SetBlockDim(usedCoreNum);
     context->SetTilingKey(1);
+    if (!SetCubeMatmulTiling(context, tiling, tileN2, expandedDim)) {
+        return ge::GRAPH_FAILED;
+    }
 
     size_t* workspaces = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspaces);
-    workspaces[0] = SYS_WORKSPACE_SIZE + static_cast<size_t>(batch * head * outputChunkLen * sizeof(int32_t));
+    size_t userWorkspaceSize = 0;
+    userWorkspaceSize += static_cast<size_t>(batch * head * outputChunkLen * sizeof(int32_t));
+    userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
+    userWorkspaceSize += static_cast<size_t>(usedCoreNum * expandedDim * sizeof(int8_t));
+    userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
+    userWorkspaceSize += static_cast<size_t>(usedCoreNum * tileN2 * expandedDim * sizeof(int8_t));
+    userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
+    userWorkspaceSize += static_cast<size_t>(usedCoreNum * tileN2 * sizeof(int32_t));
+    userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
+    userWorkspaceSize += static_cast<size_t>(usedCoreNum * maxSeqLen * sizeof(int32_t));
+    userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
+    workspaces[0] = SYS_WORKSPACE_SIZE + userWorkspaceSize;
 
     tiling.SaveToBuffer(context->GetRawTilingData()->GetData(), context->GetRawTilingData()->GetCapacity());
     context->GetRawTilingData()->SetDataSize(tiling.GetDataSize());

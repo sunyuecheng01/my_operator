@@ -17,6 +17,7 @@
 
 #include "platform/platform_ascendc.h"
 #include "register/tilingdata_base.h"
+#include "tiling/tiling_api.h"
 
 namespace optiling {
 BEGIN_TILING_DATA_DEF(HammingDistTopKTilingData)
@@ -34,6 +35,9 @@ TILING_DATA_FIELD_DEF(int64_t, hasChunkSize);
 TILING_DATA_FIELD_DEF(int64_t, hasKeyBlockTable);
 TILING_DATA_FIELD_DEF(int64_t, tileN1);
 TILING_DATA_FIELD_DEF(int64_t, tileN2);
+TILING_DATA_FIELD_DEF(int64_t, expandedDim);
+TILING_DATA_FIELD_DEF(int64_t, usedCoreNum);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmTiling);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(HammingDistTopK, HammingDistTopKTilingData)

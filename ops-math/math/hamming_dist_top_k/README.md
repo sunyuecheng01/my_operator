@@ -25,5 +25,6 @@ Skipped tail chunks are written at the end of the output when there is spare roo
 
 - `topk` is an optional attribute and defaults to 128. It is used as the static output-cap and in the repository
   formula for `maxOutputChunkLen`.
-- The current kernel computes Hamming distance directly with `uint8 XOR + popcount` on AIV. It preserves the operator
-  semantics and leaves room to replace the distance stage with the int4/cube matmul path later.
+- The kernel expands compressed bits to signed `int8` values (`0 -> -1`, `1 -> +1`) and uses CUBE Matmul to compute
+  similarity. A larger similarity means a smaller Hamming distance because `similarity = dim - 2 * distance`.
+- AIV handles bit expansion, chunk-level reduce, and Top-K; AIC handles the Matmul stage.
