@@ -34,7 +34,8 @@ extern "C" {
  * @param [in] keyBlockTableOptional: 可选，device 侧 aclTensor，dtype 为 INT32，shape 为 [batch, blockCount]，
  *        逻辑块到物理块的映射；不传（nullptr）时按连续 KV 布局处理。
  * @param [in] topk: host 侧 int64，输出容量上限相关的静态属性，默认 128。
- * @param [out] indices: device 侧 aclTensor，dtype 为 INT32，shape 为 [batch, head, outputChunkLen]。
+ * @param [out] indices: device 侧 aclTensor，dtype 为 INT32，shape 为 [batch, outputChunkLen]。
+ *        不区分 head：对所有 head 的相似度求和后选取整体得分最高的一组 chunk。
  * @param [out] workspaceSize: 返回需要在 device 侧申请的 workspace 大小。
  * @param [out] executor: 返回 op 执行器。
  * @return aclnnStatus: 返回状态码。

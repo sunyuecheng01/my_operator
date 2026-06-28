@@ -88,10 +88,12 @@ static ge::graphStatus InferShapeForHammingDistTopK(gert::InferShapeContext* con
         maxSeqLen = (blockCount >= 0 && blockSize >= 0) ? blockCount * blockSize : -1;
     }
 
-    outShape->SetDimNum(3);
+    // Output is head-agnostic: one set of TopK chunks per batch, selected by the
+    // similarity summed over all heads. Shape collapses [batch, head, L] -> [batch, L].
+    (void)head;
+    outShape->SetDimNum(2);
     outShape->SetDim(0, batch);
-    outShape->SetDim(1, head);
-    outShape->SetDim(2, CalcOutputChunkLen(maxSeqLen, GetTopKAttr(context)));
+    outShape->SetDim(1, CalcOutputChunkLen(maxSeqLen, GetTopKAttr(context)));
     OP_LOGD(context->GetNodeName(), "End to infer HammingDistTopK shape.");
     return GRAPH_SUCCESS;
 }

@@ -258,7 +258,8 @@ static ge::graphStatus TilingForHammingDistTopK(gert::TilingContext* context)
     size_t* workspaces = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspaces);
     size_t userWorkspaceSize = 0;
-    userWorkspaceSize += static_cast<size_t>(batch * head * outputChunkLen * sizeof(int32_t));
+    // score buffer is per-batch now (final TopK is head-agnostic).
+    userWorkspaceSize += static_cast<size_t>(batch * outputChunkLen * sizeof(int32_t));
     userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
     userWorkspaceSize += static_cast<size_t>(usedCoreNum * expandedDim * sizeof(int8_t));
     userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
@@ -266,7 +267,9 @@ static ge::graphStatus TilingForHammingDistTopK(gert::TilingContext* context)
     userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
     userWorkspaceSize += static_cast<size_t>(usedCoreNum * tileN2 * sizeof(int32_t));
     userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
-    userWorkspaceSize += static_cast<size_t>(usedCoreNum * maxSeqLen * sizeof(int32_t));
+    // per-chunk best similarity is persisted per (batch,head) pair so all heads can
+    // be summed per batch in phase 2; sized batch*head*maxSeqLen (chunkSize>=1).
+    userWorkspaceSize += static_cast<size_t>(batch * head * maxSeqLen * sizeof(int32_t));
     userWorkspaceSize = AlignUp(userWorkspaceSize, WORKSPACE_ALIGN);
     workspaces[0] = SYS_WORKSPACE_SIZE + userWorkspaceSize;
 

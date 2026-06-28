@@ -144,12 +144,18 @@ public:
                 SyncAll<false>();
             }
 
-            if ASCEND_IS_AIV {
-                if (active) {
-                    FinalizePair(runtime);
-                }
-            }
             SyncAll<false>();
+        }
+
+        // Barrier: every (batch,head) pair's per-chunk scores are written before the
+        // head-agnostic aggregation reads them. Both AIC and AIV must reach it.
+        SyncAll<false>();
+
+        // Phase 2: one core per batch sums all heads and selects the final TopK chunks.
+        if ASCEND_IS_AIV {
+            for (int64_t batchIdx = blockIdx; batchIdx < batch_; batchIdx += usedCoreNum_) {
+                FinalizeBatch(batchIdx);
+            }
         }
 
         if ASCEND_IS_AIC {
@@ -165,17 +171,12 @@ private:
         int64_t seqLen = 0;
         int64_t chunkSize = 1;
         int64_t effectLen = 0;
-        int64_t validChunks = 0;
-        int64_t allChunks = 0;
-        int64_t kLimit = 0;
-        int64_t outBase = 0;
-        int64_t scoreBase = 0;
     };
 
     __aicore__ inline void InitWorkspace(GM_ADDR workspace)
     {
         int64_t offset = 0;
-        const int64_t scoreBytes = totalPairs_ * outputChunkLen_ * static_cast<int64_t>(sizeof(int32_t));
+        const int64_t scoreBytes = batch_ * outputChunkLen_ * static_cast<int64_t>(sizeof(int32_t));
         scoreGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(workspace + offset));
         offset = AlignUp(offset + scoreBytes, WORKSPACE_ALIGN);
 
@@ -214,9 +215,11 @@ private:
         return mmOutGm_[CoreOffset(tileN2_)];
     }
 
-    __aicore__ inline GlobalTensor<int32_t> ChunkBestWorkspace()
+    // Per-chunk best similarity persisted per (batch,head) pair (not reused per core),
+    // so phase 2 can sum every head's contribution for a batch.
+    __aicore__ inline GlobalTensor<int32_t> ChunkBestForPair(int64_t pairId)
     {
-        return chunkBestGm_[CoreOffset(maxSeqLen_)];
+        return chunkBestGm_[pairId * maxSeqLen_];
     }
 
     __aicore__ inline int64_t QueryOffset(int64_t batchIdx, int64_t headIdx) const
@@ -251,14 +254,10 @@ private:
         runtime.pairId = pairId;
         runtime.batchIdx = pairId / head_;
         runtime.headIdx = pairId - runtime.batchIdx * head_;
-        runtime.outBase = pairId * outputChunkLen_;
-        runtime.scoreBase = pairId * outputChunkLen_;
 
-        for (int64_t i = 0; i < outputChunkLen_; ++i) {
-            indicesGm_.SetValue(runtime.outBase + i, -1);
-            scoreGm_.SetValue(runtime.scoreBase + i, INF_SCORE);
-        }
-        GlobalTensor<int32_t> chunkBest = ChunkBestWorkspace();
+        // Phase 1 only fills this pair's per-chunk best similarity; the head-agnostic
+        // TopK over the summed scores is done per batch in FinalizeBatch (phase 2).
+        GlobalTensor<int32_t> chunkBest = ChunkBestForPair(pairId);
         for (int64_t i = 0; i < maxSeqLen_; ++i) {
             chunkBest.SetValue(i, NEG_INF_SIM);
         }
@@ -268,14 +267,6 @@ private:
         runtime.chunkSize = hasChunkSize_ ? chunkSizeGm_.GetValue(runtime.batchIdx) : 1;
         runtime.chunkSize = runtime.chunkSize <= 0 ? 1 : runtime.chunkSize;
         runtime.effectLen = EffectiveLen(runtime.seqLen, runtime.chunkSize);
-        runtime.validChunks = runtime.effectLen / runtime.chunkSize;
-        runtime.allChunks = (runtime.seqLen + runtime.chunkSize - 1) / runtime.chunkSize;
-
-        runtime.kLimit = kGm_.GetValue(runtime.batchIdx);
-        runtime.kLimit = Min(Max<int64_t>(runtime.kLimit, 0), outputChunkLen_);
-        if (topkAttr_ > 0) {
-            runtime.kLimit = Min(runtime.kLimit, topkAttr_);
-        }
     }
 
     __aicore__ inline void ExpandQuery(int64_t batchIdx, int64_t headIdx)
@@ -324,7 +315,7 @@ private:
             return;
         }
         GlobalTensor<int32_t> mmWorkspace = MatmulWorkspace();
-        GlobalTensor<int32_t> chunkBest = ChunkBestWorkspace();
+        GlobalTensor<int32_t> chunkBest = ChunkBestForPair(runtime.pairId);
         const int64_t reduceN = Min(curN, runtime.effectLen - tileStart);
         for (int64_t n = 0; n < reduceN; ++n) {
             const int64_t tokenIdx = tileStart + n;
@@ -379,17 +370,46 @@ private:
         }
     }
 
-    __aicore__ inline void FinalizePair(const PairRuntime& runtime)
+    // Phase 2: aggregate every head's per-chunk best similarity for one batch and
+    // pick a single, head-agnostic TopK set of chunks. Output is [batch, outputChunkLen].
+    __aicore__ inline void FinalizeBatch(int64_t batchIdx)
     {
-        GlobalTensor<int32_t> chunkBest = ChunkBestWorkspace();
-        for (int64_t chunk = 0; chunk < runtime.validChunks; ++chunk) {
-            const int32_t sim = chunkBest.GetValue(chunk);
-            if (sim == NEG_INF_SIM) {
-                continue;
-            }
-            InsertTopK(runtime.outBase, runtime.scoreBase, runtime.kLimit, -sim, static_cast<int32_t>(chunk));
+        const int64_t outBase = batchIdx * outputChunkLen_;
+        for (int64_t i = 0; i < outputChunkLen_; ++i) {
+            indicesGm_.SetValue(outBase + i, -1);
+            scoreGm_.SetValue(outBase + i, INF_SCORE);
         }
-        FillTailChunks(runtime.outBase, runtime.kLimit, runtime.validChunks, runtime.allChunks);
+
+        int64_t seqLen = seqLenGm_.GetValue(batchIdx);
+        seqLen = Min(Max<int64_t>(seqLen, 0), maxSeqLen_);
+        int64_t chunkSize = hasChunkSize_ ? chunkSizeGm_.GetValue(batchIdx) : 1;
+        chunkSize = chunkSize <= 0 ? 1 : chunkSize;
+        const int64_t effectLen = EffectiveLen(seqLen, chunkSize);
+        const int64_t validChunks = effectLen / chunkSize;
+        const int64_t allChunks = (seqLen + chunkSize - 1) / chunkSize;
+
+        int64_t kLimit = kGm_.GetValue(batchIdx);
+        kLimit = Min(Max<int64_t>(kLimit, 0), outputChunkLen_);
+        if (topkAttr_ > 0) {
+            kLimit = Min(kLimit, topkAttr_);
+        }
+
+        for (int64_t chunk = 0; chunk < validChunks; ++chunk) {
+            int32_t agg = 0;
+            bool any = false;
+            for (int64_t h = 0; h < head_; ++h) {
+                GlobalTensor<int32_t> chunkBest = ChunkBestForPair(batchIdx * head_ + h);
+                const int32_t sim = chunkBest.GetValue(chunk);
+                if (sim != NEG_INF_SIM) {
+                    agg += sim;
+                    any = true;
+                }
+            }
+            if (any) {
+                InsertTopK(outBase, outBase, kLimit, -agg, static_cast<int32_t>(chunk));
+            }
+        }
+        FillTailChunks(outBase, kLimit, validChunks, allChunks);
     }
 
 private:
