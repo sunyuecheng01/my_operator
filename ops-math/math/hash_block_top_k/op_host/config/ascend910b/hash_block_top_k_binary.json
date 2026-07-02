@@ -1,0 +1,68 @@
+{
+  "op_type": "HashBlockTopK",
+  "optional_input_mode": "gen_placeholder",
+  "op_list": [
+    {
+      "bin_filename": "HashBlockTopK_dynamic",
+      "inputs": [
+        {
+          "name": "hash_q",
+          "index": 0,
+          "dtype": "uint8",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "hash_k_cache",
+          "index": 1,
+          "dtype": "uint8",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "k",
+          "index": 2,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "hash_k_block_table",
+          "index": 3,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        },
+        {
+          "name": "seqlen",
+          "index": 4,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ],
+      "attrs": [],
+      "outputs": [
+        {
+          "name": "new_block_table",
+          "index": 0,
+          "dtype": "int32",
+          "format": "ND",
+          "paramType": "required",
+          "shape": [-2],
+          "format_match_mode": "FormatAgnostic"
+        }
+      ]
+    }
+  ]
+}
